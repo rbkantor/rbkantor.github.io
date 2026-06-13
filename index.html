@@ -53,7 +53,7 @@
   <div class="sub">Tap a car to disable it (<b>red</b>) — crashes auto-clear. Police pull cars over (turns amber).</div>
   <div class="row"><button id="pause">Pause</button><button id="regen">New map</button></div>
   <div class="row"><button id="revive">Revive all</button></div>
-  <div class="field"><label>Traffic <span id="countLbl">75</span></label><input id="count" type="range" min="10" max="180" value="75"></div>
+  <div class="field"><label>Traffic <span id="countLbl">60</span></label><input id="count" type="range" min="10" max="180" value="60"></div>
   <div class="field"><label>Road density <span id="roadsLbl">60%</span></label><input id="roads" type="range" min="15" max="95" value="60"></div>
   <div class="field"><label>Roadblocks <span id="blocksLbl">3</span></label><input id="blocks" type="range" min="0" max="14" value="3"></div>
   <div class="field"><label>Scenery <span id="sceneLbl">60%</span></label><input id="scene" type="range" min="0" max="100" value="60"></div>
@@ -77,6 +77,11 @@ const LW=12, CAR_L=17, CAR_W=9, STOPGAP=5, EXIT_PAD=3, DECISION_DIST=85;
 const G=4.6, R=1.3, Yp=1.5, CYCLE=2*(G+Yp+R), DAY_LEN=82;
 const ACC=78, DEC=98, S0=7, T_HW=0.7, TURN_SPEED=42, PASS_GAP=58;
 const CRASH_CLEAR=6, CRASH_GRACE=2.2, IMPATIENCE=5;
+const CAR_COLORS=[[233,236,242],[223,228,237],[214,219,228],
+  [238,118,170],[230,86,150],
+  [82,142,228],[64,108,214],
+  [82,190,120],[64,170,104],
+  [240,196,84],[226,128,70],[96,196,196]];
 
 let W,H,dpr;
 let hys=[], vxs=[], xmin,xmax,ymin,ymax;
@@ -84,7 +89,7 @@ let hSeg={}, vSeg={};
 let lanes=[], laneMap=new Map(), roadCfg=new Map(), intersections=new Map();
 let cars=[], barriers=[], bars=[], sceneCells=[], nightWindows=[];
 let bg=document.createElement('canvas'), bgx=bg.getContext('2d');
-let targetCount=75, roadKeepProb=0.60, roadblockTarget=3, sceneryLevel=60;
+let targetCount=60, roadKeepProb=0.60, roadblockTarget=3, sceneryLevel=60;
 let paused=false, lastT=performance.now(), simClock=0;
 
 const rand=(a,b)=>a+Math.random()*(b-a);
@@ -105,7 +110,7 @@ function dropInterior(arr,keep){
 }
 function makeRoadCfg(axis,center){
   let oneway=false,dirs,m,owDir=null,n=null;
-  if(Math.random()<0.16){ oneway=true; owDir=Math.random()<0.5?1:-1; n=Math.random()<0.55?1:2; dirs=[owDir]; }
+  if(false){ oneway=true; owDir=Math.random()<0.5?1:-1; n=Math.random()<0.55?1:2; dirs=[owDir]; }
   else { dirs=[1,-1]; m=Math.random()<0.55?2:1; }
   const totalLanes=oneway?n:2*m;
   return {axis,center,oneway,owDir,dirs,dirsSet:new Set(dirs),lanesPerDir:oneway?n:m,
@@ -169,7 +174,7 @@ function buildIntersections(){
     const X=vxs[i],Y=hys[j];
     const E=i<vxs.length-1&&hSeg[Y][i], Wr=i>0&&hSeg[Y][i-1], S=j<hys.length-1&&vSeg[X][j], N=j>0&&vSeg[X][j-1];
     const arm=(E?1:0)+(Wr?1:0)+(S?1:0)+(N?1:0);
-    let control='none'; if(arm>=3) control=Math.random()<0.24?'stop':'signal';
+    let control='none'; if(arm>=3) control=Math.random()<0.15?'stop':'signal';
     intersections.set(X+'_'+Y,{x:X,y:Y,i,j,E,W:Wr,S,N,arm,control,signalized:control==='signal',offset:Math.random()*CYCLE,turning:null,occupant:null,occTime:0});
   }
 }
@@ -272,9 +277,10 @@ function lightState(it,axis,t){
   return 'red';
 }
 const SKY=[
-  {p:0.00,c:[8,12,30],a:0.66},{p:0.20,c:[12,16,34],a:0.58},{p:0.26,c:[74,48,42],a:0.34},
-  {p:0.33,c:[120,92,70],a:0.10},{p:0.50,c:[255,255,255],a:0.0},{p:0.68,c:[140,96,62],a:0.10},
-  {p:0.76,c:[120,55,40],a:0.34},{p:0.84,c:[20,18,40],a:0.55},{p:1.00,c:[8,12,30],a:0.66}
+  {p:0.00,c:[20,27,50],a:0.40},{p:0.13,c:[22,29,52],a:0.38},{p:0.19,c:[92,64,56],a:0.22},
+  {p:0.27,c:[150,116,84],a:0.06},{p:0.40,c:[255,255,255],a:0.0},{p:0.60,c:[255,255,255],a:0.0},
+  {p:0.73,c:[156,104,68],a:0.08},{p:0.81,c:[64,48,62],a:0.22},{p:0.90,c:[20,27,50],a:0.40},
+  {p:1.00,c:[20,27,50],a:0.40}
 ];
 function skyTint(phase){
   let i=0; while(i<SKY.length-1 && phase>SKY[i+1].p) i++;
@@ -343,6 +349,15 @@ function doUTurn(car,lane,nc){
   else { targetC=car.c-lane.dir*10; p3={x:opp.coord,y:targetC}; h3={x:0,y:-lane.dir}; }
   car.conn=makeConnector(p0,h0,p3,h3,opp,targetC); car.connD=0; car.mode='turn';
 }
+function uTurnInPlace(car){
+  const lane=car.lane, opp=laneMap.get(lane.axis+'_'+(-lane.dir)+'_'+lane.roadCenter+'_0');
+  if(!opp){ relocateCar(car); return; }
+  const p0={x:car.x,y:car.y}, h0=lane.axis==='h'?{x:lane.dir,y:0}:{x:0,y:lane.dir};
+  let p3,h3,targetC;
+  if(lane.axis==='h'){ targetC=car.c-lane.dir*8; p3={x:targetC,y:opp.coord}; h3={x:-lane.dir,y:0}; }
+  else { targetC=car.c-lane.dir*8; p3={x:opp.coord,y:targetC}; h3={x:0,y:-lane.dir}; }
+  car.conn=makeConnector(p0,h0,p3,h3,opp,targetC); car.connD=0; car.mode='turn';
+}
 function drawStopSign(g,x,y,r){
   g.fillStyle='#c1272d'; g.beginPath();
   for(let i=0;i<8;i++){ const a=Math.PI/8+i*Math.PI/4, px=x+Math.cos(a)*r, py=y+Math.sin(a)*r; i?g.lineTo(px,py):g.moveTo(px,py); }
@@ -396,7 +411,7 @@ function makeCar(lane,c){
     disabled:false,disabledBy:null,clearAt:0,graceUntil:0,conn:null,connD:0,turnInt:null,
     stopTime:null,stopKey:null,occInt:null,occKey:null,holdTime:0,
     police:false,pstate:'patrol',ptimer:0,cooldown:0,target:null,pulledOver:false,
-    x:0,y:0,angle:0,tint:[236+ri(10),240+ri(8),247]};
+    x:0,y:0,angle:0,tint:CAR_COLORS[ri(CAR_COLORS.length)].slice()};
 }
 function freeSpot(){
   for(let t=0;t<60;t++){
@@ -451,6 +466,7 @@ function updateCar(car,dt,t){
   let nc=null,ncd=0;
   for(const cr of lane.crossings){ const d=lane.dir*(cr.P-car.c); if(d>-cr.perpHalf-0.01){ nc=cr; ncd=d; break; } }
   if(car.occKey){ if(!nc||nc.key!==car.occKey){ const oi=car.occInt; if(oi&&oi.occupant===car) oi.occupant=null; car.occInt=null; car.occKey=null; } }
+  if(!nc){ uTurnInPlace(car); placeCar(car); return; }
 
   let obsGap=Infinity,obsV=0,passBlock=false;
   const la=leadAhead(car);
@@ -658,16 +674,17 @@ function drawCar(car,t){
 }
 function render(t){
   ctx.drawImage(bg,0,0,W,H);
-  const phase=(t%DAY_LEN)/DAY_LEN, dayLight=0.5-0.5*Math.cos(phase*2*Math.PI), night=1-dayLight;
+  const phase=(t%DAY_LEN)/DAY_LEN;
   const tint=skyTint(phase);
   if(tint[1]>0.001){ ctx.fillStyle='rgba('+tint[0]+','+tint[1]+')'; ctx.fillRect(0,0,W,H); }
-  if(night>0.30){
+  const nf=clamp((tint[1]-0.10)/0.30,0,1);
+  if(nf>0.04){
     ctx.globalCompositeOperation='lighter';
     for(const it of intersections.values()){ if(!((it.E||it.W)&&(it.N||it.S))) continue;
-      const gr=ctx.createRadialGradient(it.x,it.y,2,it.x,it.y,34);
-      gr.addColorStop(0,'rgba(255,208,138,'+(0.26*night)+')'); gr.addColorStop(1,'rgba(255,208,138,0)');
-      ctx.fillStyle=gr; ctx.fillRect(it.x-34,it.y-34,68,68); }
-    ctx.fillStyle='rgba(255,212,150,'+(0.72*night)+')';
+      const gr=ctx.createRadialGradient(it.x,it.y,2,it.x,it.y,40);
+      gr.addColorStop(0,'rgba(255,212,142,'+(0.36*nf)+')'); gr.addColorStop(1,'rgba(255,212,142,0)');
+      ctx.fillStyle=gr; ctx.fillRect(it.x-40,it.y-40,80,80); }
+    ctx.fillStyle='rgba(255,214,150,'+(0.5*nf)+')';
     for(const w of nightWindows) ctx.fillRect(w.x,w.y,w.w,w.w);
     ctx.globalCompositeOperation='source-over';
   }
@@ -675,14 +692,14 @@ function render(t){
     ctx.fillStyle=st==='green'?'#37d67a':st==='yellow'?'#ffcf3a':'#ff5a5a'; ctx.fillRect(b.x,b.y,b.w,b.h); }
   for(const car of cars) if(!car.police) drawCar(car,t);
   for(const car of cars) if(car.police) drawCar(car,t);
-  if(night>0.30){
+  if(nf>0.04){
     ctx.globalCompositeOperation='lighter';
     for(const car of cars){ if(car.disabled) continue;
       const cx=Math.cos(car.angle), sy=Math.sin(car.angle), hx=car.x+cx*11, hy=car.y+sy*11;
-      const gr=ctx.createRadialGradient(hx,hy,1,hx,hy,17);
-      gr.addColorStop(0,'rgba(255,240,190,'+(0.5*night)+')'); gr.addColorStop(1,'rgba(255,240,190,0)');
-      ctx.fillStyle=gr; ctx.fillRect(hx-17,hy-17,34,34);
-      ctx.fillStyle='rgba(255,60,60,'+(0.3*night)+')'; ctx.beginPath(); ctx.arc(car.x-cx*10,car.y-sy*10,3,0,7); ctx.fill();
+      const gr=ctx.createRadialGradient(hx,hy,1,hx,hy,16);
+      gr.addColorStop(0,'rgba(255,240,190,'+(0.42*nf)+')'); gr.addColorStop(1,'rgba(255,240,190,0)');
+      ctx.fillStyle=gr; ctx.fillRect(hx-16,hy-16,32,32);
+      ctx.fillStyle='rgba(255,70,70,'+(0.26*nf)+')'; ctx.beginPath(); ctx.arc(car.x-cx*10,car.y-sy*10,2.8,0,7); ctx.fill();
     }
     ctx.globalCompositeOperation='source-over';
   }
@@ -697,13 +714,13 @@ function frame(now){
     detectCollisions(simClock);
     for(const it of intersections.values()){ if(it.occupant&&simClock-it.occTime>4){ const o=it.occupant; it.occupant=null; if(o.occInt===it){ o.occInt=null; o.occKey=null; } } if(it.turning&&simClock-(it.turnTime||0)>4){ it.turning=null; } }
     for(const c of cars){ if(c.disabled&&c.disabledBy==='collision'&&simClock>=c.clearAt){ c.disabled=false; c.disabledBy=null; c.graceUntil=simClock+CRASH_GRACE; c.speed=0; } }
-    for(const c of cars){ if(!c.disabled&&!c.pulledOver&&c.mode==='lane'&&c.speed<1&&c.waitTime>14) relocateCar(c); }
+    for(const c of cars){ if(!c.disabled&&!c.pulledOver&&c.mode==='lane'&&c.speed<1&&c.waitTime>15) uTurnInPlace(c); }
   }
   render(simClock);
   let moving=0,dead=0; for(const c of cars){ if(c.disabled) dead++; else if(c.speed>6) moving++; }
   movingEl.textContent=moving; deadEl.textContent=dead;
   const ph=(simClock%DAY_LEN)/DAY_LEN;
-  todEl.textContent = (ph<0.22||ph>=0.86)?'night':ph<0.30?'dawn':ph<0.70?'day':ph<0.80?'dusk':'night';
+  todEl.textContent = (ph<0.15||ph>=0.88)?'night':ph<0.30?'dawn':ph<0.72?'day':ph<0.85?'dusk':'night';
   requestAnimationFrame(frame);
 }
 
