@@ -283,11 +283,27 @@ function lightState(it,axis,t){
   return 'red';
 }
 function sigState(it,axis){ if(it.sigPhase==='green'&&it.sigAxis===axis) return 'green'; if(it.sigPhase==='yellow'&&it.sigAxis===axis) return 'yellow'; return 'red'; }
+const MAXG_EXT=22;
+function queueAt(it){
+  let qH=0,qV=0;
+  for(const c of cars){
+    if(c.disabled||c.mode!=='lane'||c.speed>10||!c.lane) continue;
+    const dx=Math.abs(c.x-it.x), dy=Math.abs(c.y-it.y);
+    if(c.lane.axis==='h'&&dy<LW*2.2&&dx>LW&&dx<DECISION_DIST) qH++;
+    else if(c.lane.axis==='v'&&dx<LW*2.2&&dy>LW&&dy<DECISION_DIST) qV++;
+  }
+  return {qH,qV};
+}
 function updateSignals(dt){
   for(const it of intersections.values()){ if(it.control!=='signal') continue;
-    it.sigT+=dt; const cur=it.sigAxis, dC=cur==='h'?it.dmdH:it.dmdV, dO=cur==='h'?it.dmdV:it.dmdH;
-    if(it.sigPhase==='green'){ if(it.sigT>=MAXG || (it.sigT>=MING && (dC===0 ? dO>0 : dO>dC*1.4))){ it.sigPhase='yellow'; it.sigT=0; } }
-    else if(it.sigPhase==='yellow'){ if(it.sigT>=Yp){ it.sigPhase='allred'; it.sigT=0; } }
+    it.sigT+=dt; const cur=it.sigAxis;
+    const {qH,qV}=queueAt(it);
+    const qC=cur==='h'?qH:qV, qO=cur==='h'?qV:qH;
+    if(it.sigPhase==='green'){
+      const maxG=Math.min(MAXG_EXT, MING+qC*0.9);
+      const sw=it.sigT>=MAXG_EXT||(it.sigT>=maxG&&(qO>0||qC===0))||(it.sigT>=MING&&qC===0&&qO>0);
+      if(sw){ it.sigPhase='yellow'; it.sigT=0; }
+    } else if(it.sigPhase==='yellow'){ if(it.sigT>=Yp){ it.sigPhase='allred'; it.sigT=0; } }
     else { if(it.sigT>=R){ it.sigPhase='green'; it.sigAxis=cur==='h'?'v':'h'; it.sigT=0; } }
     it.dmdH=0; it.dmdV=0;
   }
@@ -422,7 +438,7 @@ function connPathClear(conn,exclude){
 }
 function doUTurn(car,lane,nc){
   const opp=laneMap.get(lane.axis+'_'+(-lane.dir)+'_'+lane.roadCenter+'_0');
-  if(!opp){ releaseBox(car); relocateCar(car); return; }
+  if(!opp){ car.speed=0; return; }
   const targetC=car.c-lane.dir*10;
   const p0={x:car.x,y:car.y}, h0=lane.axis==='h'?{x:lane.dir,y:0}:{x:0,y:lane.dir};
   let p3,h3;
@@ -434,7 +450,7 @@ function doUTurn(car,lane,nc){
 }
 function uTurnInPlace(car){
   const lane=car.lane, opp=laneMap.get(lane.axis+'_'+(-lane.dir)+'_'+lane.roadCenter+'_0');
-  if(!opp){ releaseBox(car); relocateCar(car); return; }
+  if(!opp){ car.speed=0; return; }
   const targetC=car.c-lane.dir*8;
   const p0={x:car.x,y:car.y}, h0=lane.axis==='h'?{x:lane.dir,y:0}:{x:0,y:lane.dir};
   let p3,h3;
@@ -589,7 +605,7 @@ function updateCar(car,dt,t){
   let nc=null,ncd=0;
   for(const cr of lane.crossings){ const d=lane.dir*(cr.P-car.c); if(d>-cr.perpHalf-0.01){ nc=cr; ncd=d; break; } }
   if(car.occKey){ if(!nc||nc.key!==car.occKey){ const oi=car.occInt; if(oi&&oi.occupant===car) oi.occupant=null; car.occInt=null; car.occKey=null; } }
-  if(!nc){ uTurnInPlace(car); placeCar(car); return; }
+  if(!nc){ car.speed=0; return; }
 
   let obsGap=Infinity,obsV=0,passBlock=false;
   const la=leadAhead(car);
@@ -610,9 +626,9 @@ function updateCar(car,dt,t){
   if(nc){
     distToStop=ncd-(nc.perpHalf+STOPGAP); inBox=ncd<nc.perpHalf;
     const key=nc.key, it=intersections.get(key);
-    if(it.control==='signal'&&distToStop<DECISION_DIST&&distToStop>-nc.perpHalf){ if(lane.axis==='h') it.dmdH++; else it.dmdV++; }
+    if(it.control==='signal'&&distToStop<DECISION_DIST&&distToStop>-nc.perpHalf){ /* queue counted in updateSignals */ }
     if(key!==car.decKey){ car.decKey=key; car.move=null; car.stopKey=null; car.stopTime=null; }
-    if(car.move===null&&distToStop<DECISION_DIST){ const mv=chooseMove(car,lane,it); if(mv===null){ doUTurn(car,lane,nc); placeCar(car); return; } car.move=mv; }
+    if(car.move===null&&distToStop<DECISION_DIST){ const mv=chooseMove(car,lane,it); if(mv===null){ car.speed=0; return; } car.move=mv; }
     if(car.police&&car.pstate==='engaging'&&car.move){ const vm=validMoves(lane,it); if(vm.includes('straight')) car.move='straight'; else releasePolice(car); }
     if(car.move&&car.move!=='straight'&&!car.police&&car.waitTime>2.5&&moveBlocked(lane,nc,car.move)){
       const open=validMoves(lane,it).filter(m=>m!==car.move&&!moveBlocked(lane,nc,m));
@@ -865,7 +881,6 @@ function frame(now){
     detectCollisions(simClock);
     for(const it of intersections.values()){ if(it.occupant&&simClock-it.occTime>4){ const o=it.occupant; it.occupant=null; if(o.occInt===it){ o.occInt=null; o.occKey=null; } } if(it.turning&&simClock-(it.turnTime||0)>4){ it.turning=null; } }
     for(const c of cars){ if(c.disabled&&c.disabledBy==='collision'&&simClock>=c.clearAt){ c.disabled=false; c.disabledBy=null; c.graceUntil=simClock+CRASH_GRACE; c.speed=0; } }
-    for(const c of cars){ if(!c.disabled&&!c.pulledOver&&!c.isBus&&c.mode==='lane'&&c.speed<1){ if(c.waitTime>30) relocateCar(c); else if(c.waitTime>15) uTurnInPlace(c); } }
   }
   render(simClock);
   let moving=0,dead=0; for(const c of cars){ if(c.disabled) dead++; else if(c.speed>6) moving++; }
