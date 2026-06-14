@@ -124,6 +124,7 @@ let bg=document.createElement('canvas'), bgx=bg.getContext('2d');
 let targetCount=60, roadKeepProb=0.60, roadblockTarget=3, sceneryLevel=60;
 let paused=false, lastT=performance.now(), simClock=0;
 let deadlockTimer=0;   // accumulates to 1s; gates the rare gridlock-breaker check
+let holderHighlight=[];  // [{car, until}] — cars to ring-highlight after dblclick on intersection
 
 const rand=(a,b)=>a+Math.random()*(b-a);
 const ri=n=>Math.floor(Math.random()*n);
@@ -983,6 +984,29 @@ function render(t){
     ctx.fillStyle=st==='green'?'#37d67a':st==='yellow'?'#ffcf3a':'#ff5a5a'; ctx.fillRect(b.x,b.y,b.w,b.h); }
   for(const car of cars) if(!car.police) drawCar(car,t);
   for(const car of cars) if(car.police) drawCar(car,t);
+  // draw reservation-holder highlight rings (from dblclick on intersection)
+  const now2=performance.now()/1000;
+  holderHighlight=holderHighlight.filter(h=>h.until>now2);
+  for(const h of holderHighlight){
+    const c=h.car, age=h.until-now2, life=h.total, frac=age/life;
+    const pulse=0.55+0.45*Math.sin(now2*9);        // pulsing intensity
+    const alpha=(frac<0.3?frac/0.3:1)*pulse;       // fade out in last 30%
+    ctx.save(); ctx.translate(c.x,c.y);
+    // outer glow
+    ctx.beginPath(); ctx.arc(0,0,(c.len||CAR_L)*0.82,0,Math.PI*2);
+    ctx.strokeStyle='rgba(255,210,40,'+alpha.toFixed(2)+')';
+    ctx.lineWidth=3.5; ctx.shadowColor='rgba(255,200,0,0.9)'; ctx.shadowBlur=12;
+    ctx.stroke();
+    // inner dot to label the car
+    ctx.beginPath(); ctx.arc(0,0,2.5,0,Math.PI*2);
+    ctx.fillStyle='rgba(255,220,60,'+alpha.toFixed(2)+')'; ctx.shadowBlur=0; ctx.fill();
+    // move label (left/right/straight) above the ring
+    if(c.move){ ctx.shadowBlur=4; ctx.shadowColor='rgba(0,0,0,0.8)';
+      ctx.fillStyle='rgba(255,225,80,'+alpha.toFixed(2)+')';
+      ctx.font='bold 9px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='bottom';
+      ctx.fillText(c.move[0].toUpperCase()+(c._bmove?'/'+c._bmove[0].toUpperCase():''),0,-(c.len||CAR_L)*0.82-3); }
+    ctx.restore();
+  }
   if(nf>0.04){
     ctx.globalCompositeOperation='lighter';
     for(const car of cars){ if(car.disabled) continue;
@@ -1118,7 +1142,22 @@ canvas.addEventListener('pointerdown',e=>{
   if(bi) cycleControl(bi);
 });
 
-/* ---- ui ---- */
+/* Double-click on an intersection: flash a ring around every car currently
+   reserving its box (it.holders), so you can see stale or active holders. */
+canvas.addEventListener('dblclick',e=>{
+  const r=canvas.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+  let bi=null, bdist=50*50;
+  for(const it of intersections.values()){ const dx=it.x-mx, dy=it.y-my, d=dx*dx+dy*dy; if(d<bdist){bdist=d;bi=it;} }
+  if(!bi||!bi.holders||!bi.holders.length){ return; }
+  // prune stale holders first so we only highlight real ones
+  boxPrune(bi,simClock);
+  const DURATION=3;
+  const until=performance.now()/1000+DURATION;
+  // remove any existing highlights for these cars, then add fresh ones
+  const hcars=new Set(bi.holders);
+  holderHighlight=holderHighlight.filter(h=>!hcars.has(h.car));
+  for(const c of bi.holders) holderHighlight.push({car:c, until, total:DURATION});
+});
 const hud=document.getElementById('hud');
 const pauseBtn=document.getElementById('pause'),regenBtn=document.getElementById('regen'),reviveBtn=document.getElementById('revive');
 const countInput=document.getElementById('count'),countLbl=document.getElementById('countLbl');
