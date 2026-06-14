@@ -354,19 +354,33 @@ function validMoves(lane,it){
   }
   return m;
 }
+function barrierAhead(lane,fromC,dir,dist){
+  for(const b of barriers){ if(b.lane!==lane) continue; const dd=dir*(b.c-fromC); if(dd>2&&dd<dist) return true; }
+  return false;
+}
 function chooseMove(car,lane,it){
   const moves=validMoves(lane,it); if(!moves.length) return null;
+  let mv=null;
   if(routing&&car&&car.dest!=null&&!car.police){
     const K=it.x+'_'+it.y;
     if(K===car.dest){ if(car.isBus) car.busPause=rand(2.5,4.5); assignDest(car); }
     if(car.dest!=null){ const path=routeTo(K,car.dest);
-      if(path&&path.length>=2){ const ex=exitDirTo(it,path[1]); const mv=ex&&moveForExit(lane,ex);
-        if(mv==='uturn') return null; if(mv&&moves.includes(mv)) return mv; } }
+      if(path&&path.length>=2){ const ex=exitDirTo(it,path[1]); const m2=ex&&moveForExit(lane,ex);
+        if(m2&&m2!=='uturn'&&moves.includes(m2)) mv=m2; } }
   }
-  const disc=moves.filter(mv=> mv==='straight'?true : mv==='right'?lane.laneIdx===lane.nLanesDir-1 : lane.laneIdx===0);
-  const use=disc.length?disc:moves, w=use.map(mv=>mv==='straight'?3:1);
-  let tot=w.reduce((a,b)=>a+b,0), r=Math.random()*tot;
-  for(let i=0;i<use.length;i++){ r-=w[i]; if(r<=0) return use[i]; } return use[0];
+  if(mv===null){
+    const disc=moves.filter(m=> m==='straight'?true : m==='right'?lane.laneIdx===lane.nLanesDir-1 : lane.laneIdx===0);
+    const use=disc.length?disc:moves, w=use.map(m=>m==='straight'?3:1);
+    let tot=w.reduce((a,b)=>a+b,0), r=Math.random()*tot;
+    for(let i=0;i<use.length;i++){ r-=w[i]; if(r<=0){ mv=use[i]; break; } }
+    if(mv===null) mv=use[0];
+  }
+  const Pcur=lane.axis==='h'?it.x:it.y;
+  if(mv==='straight'&&barrierAhead(lane,Pcur,lane.dir,78)){
+    const turns=moves.filter(m=>m!=='straight');
+    if(turns.length) mv=turns[(Math.random()*turns.length)|0];
+  }
+  return mv;
 }
 function targetLaneFor(lane,P,move){
   let taxis,tdir,troad;
@@ -399,23 +413,36 @@ function initiateTurn(car,lane,nc){
   if(tL.axis==='v'){ p3={x:tL.coord,y:exit}; h3={x:0,y:tL.dir}; } else { p3={x:exit,y:tL.coord}; h3={x:tL.dir,y:0}; }
   car.conn=makeConnector(p0,h0,p3,h3,tL,exit); car.connD=0; car.mode='turn';
 }
+function connPathClear(conn,exclude){
+  for(let i=0;i<conn.pts.length;i++){ const p=conn.pts[i];
+    for(const o of cars){ if(o===exclude) continue;
+      const r=(o.mode==='turn'?CAR_L*0.9:CAR_L*0.8);
+      if(Math.hypot(o.x-p.x,o.y-p.y)<r) return false; } }
+  return true;
+}
 function doUTurn(car,lane,nc){
-  releaseBox(car); const opp=laneMap.get(lane.axis+'_'+(-lane.dir)+'_'+lane.roadCenter+'_0');
-  if(!opp){ relocateCar(car); return; }
+  const opp=laneMap.get(lane.axis+'_'+(-lane.dir)+'_'+lane.roadCenter+'_0');
+  if(!opp){ releaseBox(car); relocateCar(car); return; }
+  const targetC=car.c-lane.dir*10;
   const p0={x:car.x,y:car.y}, h0=lane.axis==='h'?{x:lane.dir,y:0}:{x:0,y:lane.dir};
-  let p3,h3,targetC;
-  if(lane.axis==='h'){ targetC=car.c-lane.dir*10; p3={x:targetC,y:opp.coord}; h3={x:-lane.dir,y:0}; }
-  else { targetC=car.c-lane.dir*10; p3={x:opp.coord,y:targetC}; h3={x:0,y:-lane.dir}; }
-  car.conn=makeConnector(p0,h0,p3,h3,opp,targetC); car.connD=0; car.mode='turn';
+  let p3,h3;
+  if(lane.axis==='h'){ p3={x:targetC,y:opp.coord}; h3={x:-lane.dir,y:0}; }
+  else { p3={x:opp.coord,y:targetC}; h3={x:0,y:-lane.dir}; }
+  const conn=makeConnector(p0,h0,p3,h3,opp,targetC);
+  if(!connPathClear(conn,car)){ car.speed=0; return; }
+  releaseBox(car); car.conn=conn; car.connD=0; car.mode='turn';
 }
 function uTurnInPlace(car){
-  releaseBox(car); const lane=car.lane, opp=laneMap.get(lane.axis+'_'+(-lane.dir)+'_'+lane.roadCenter+'_0');
-  if(!opp){ relocateCar(car); return; }
+  const lane=car.lane, opp=laneMap.get(lane.axis+'_'+(-lane.dir)+'_'+lane.roadCenter+'_0');
+  if(!opp){ releaseBox(car); relocateCar(car); return; }
+  const targetC=car.c-lane.dir*8;
   const p0={x:car.x,y:car.y}, h0=lane.axis==='h'?{x:lane.dir,y:0}:{x:0,y:lane.dir};
-  let p3,h3,targetC;
-  if(lane.axis==='h'){ targetC=car.c-lane.dir*8; p3={x:targetC,y:opp.coord}; h3={x:-lane.dir,y:0}; }
-  else { targetC=car.c-lane.dir*8; p3={x:opp.coord,y:targetC}; h3={x:0,y:-lane.dir}; }
-  car.conn=makeConnector(p0,h0,p3,h3,opp,targetC); car.connD=0; car.mode='turn';
+  let p3,h3;
+  if(lane.axis==='h'){ p3={x:targetC,y:opp.coord}; h3={x:-lane.dir,y:0}; }
+  else { p3={x:opp.coord,y:targetC}; h3={x:0,y:-lane.dir}; }
+  const conn=makeConnector(p0,h0,p3,h3,opp,targetC);
+  if(!connPathClear(conn,car)){ car.speed=0; return; }
+  releaseBox(car); car.conn=conn; car.connD=0; car.mode='turn';
 }
 function drawStopSign(g,x,y,r){
   g.fillStyle='#c1272d'; g.beginPath();
@@ -468,6 +495,13 @@ function entryBlocked(lane,P,move){
   for(const o of cars){ if(o.lane===tL&&o.mode==='lane'){ const dd=tL.dir*(o.c-tc); if(dd>-CAR_L&&dd<CAR_L*2.2) return true; } }
   for(const b of barriers){ if(b.lane===tL){ const dd=tL.dir*(b.c-tc); if(dd>-CAR_L&&dd<CAR_L*2.2) return true; } }
   return false;
+}
+function moveBlocked(lane,nc,move){
+  if(move==='straight'){ const dir=lane.dir, past=nc.P+dir*(nc.perpHalf+CAR_L*0.8);
+    for(const b of barriers){ if(b.lane===lane){ const dd=dir*(b.c-past); if(dd>-CAR_L&&dd<CAR_L*2.2) return true; } }
+    for(const o of cars){ if(o.lane===lane&&o.mode==='lane'&&o.speed<3){ const dd=dir*(o.c-past); if(dd>-CAR_L*0.6&&dd<CAR_L*2.2) return true; } }
+    return false; }
+  return entryBlocked(lane,nc.P,move);
 }
 function siblingClear(car,sib){
   for(const o of cars){ if(o.lane!==sib||o.mode!=='lane') continue; const dd=sib.dir*(o.c-car.c); if(dd>-CAR_L*3.2&&dd<68) return false; }
@@ -580,6 +614,10 @@ function updateCar(car,dt,t){
     if(key!==car.decKey){ car.decKey=key; car.move=null; car.stopKey=null; car.stopTime=null; }
     if(car.move===null&&distToStop<DECISION_DIST){ const mv=chooseMove(car,lane,it); if(mv===null){ doUTurn(car,lane,nc); placeCar(car); return; } car.move=mv; }
     if(car.police&&car.pstate==='engaging'&&car.move){ const vm=validMoves(lane,it); if(vm.includes('straight')) car.move='straight'; else releasePolice(car); }
+    if(car.move&&car.move!=='straight'&&!car.police&&car.waitTime>2.5&&moveBlocked(lane,nc,car.move)){
+      const open=validMoves(lane,it).filter(m=>m!==car.move&&!moveBlocked(lane,nc,m));
+      if(open.length) car.move = open.includes('straight')?'straight':open[0];
+    }
     if(!inBox&&car.move){
       let needStop=false, hardStop=false;
       const straight=car.move==='straight';
@@ -827,7 +865,7 @@ function frame(now){
     detectCollisions(simClock);
     for(const it of intersections.values()){ if(it.occupant&&simClock-it.occTime>4){ const o=it.occupant; it.occupant=null; if(o.occInt===it){ o.occInt=null; o.occKey=null; } } if(it.turning&&simClock-(it.turnTime||0)>4){ it.turning=null; } }
     for(const c of cars){ if(c.disabled&&c.disabledBy==='collision'&&simClock>=c.clearAt){ c.disabled=false; c.disabledBy=null; c.graceUntil=simClock+CRASH_GRACE; c.speed=0; } }
-    for(const c of cars){ if(!c.disabled&&!c.pulledOver&&c.mode==='lane'&&c.speed<1&&c.waitTime>15) uTurnInPlace(c); }
+    for(const c of cars){ if(!c.disabled&&!c.pulledOver&&!c.isBus&&c.mode==='lane'&&c.speed<1){ if(c.waitTime>30) relocateCar(c); else if(c.waitTime>15) uTurnInPlace(c); } }
   }
   render(simClock);
   let moving=0,dead=0; for(const c of cars){ if(c.disabled) dead++; else if(c.speed>6) moving++; }
