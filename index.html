@@ -452,7 +452,15 @@ function chooseMove(car,lane,it){
     if(K===car.dest){ if(car.isBus) car.busPause=rand(2.5,4.5); assignDest(car); }  // arrived: pick a new goal
     if(car.dest!=null){ const path=routeTo(K,car.dest);
       if(path&&path.length>=2){ const ex=exitDirTo(it,path[1]); const m2=ex&&moveForExit(lane,ex);
-        if(m2&&m2!=='uturn'&&moves.includes(m2)) mv=m2; } }   // only take it if it's a legal move for this lane
+        if(m2&&m2!=='uturn'&&moves.includes(m2)){
+          // skip routed move if its exit lane has a barrier anywhere in the first
+          // segment — prevents routing re-assigning the same permanently-blocked turn
+          const itP=lane.axis==='h'?it.x:it.y;
+          const nc2=lane.crossings.find(cr=>Math.abs(cr.P-itP)<1);
+          const tL=nc2&&targetLaneFor(lane,nc2.P,m2);
+          const barrierInExit=tL&&barriers.some(b=>b.lane===tL);
+          if(!barrierInExit) mv=m2;
+        } } }
   }
   if(mv===null){                                          // fallback: weighted-random legal move
     const use=moves, w=use.map(m=>m==='straight'?3:1);    // straight is 3x as likely as a turn
