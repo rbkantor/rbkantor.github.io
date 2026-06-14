@@ -45,6 +45,24 @@
     border:1px solid var(--line);border-radius:10px;padding:7px 11px;max-width:66vw}
   .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
   @media (max-width:640px){ .hud{width:auto;left:10px;right:10px;top:10px} .legend{display:none} }
+  /* ---- car info popup ---- */
+  #carPopup{position:fixed;z-index:20;pointer-events:auto;
+    background:rgba(14,18,26,0.92);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border:1px solid rgba(255,255,255,0.13);border-radius:14px;padding:14px 18px 16px;
+    min-width:210px;box-shadow:0 14px 40px rgba(0,0,0,.55);
+    font-size:11.5px;letter-spacing:.03em;color:var(--ink);
+    transition:opacity .18s,transform .18s;opacity:0;transform:scale(.94);pointer-events:none}
+  #carPopup.visible{opacity:1;transform:scale(1);pointer-events:auto}
+  #carPopup h2{margin:0 0 10px;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  #carPopup .cp-row{display:flex;justify-content:space-between;gap:16px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.06)}
+  #carPopup .cp-row:last-child{border-bottom:none}
+  #carPopup .cp-label{color:var(--muted)}
+  #carPopup .cp-val{color:var(--ink);font-weight:700;text-align:right}
+  #carPopup .cp-reason{margin-top:9px;padding-top:9px;border-top:1px solid rgba(255,255,255,0.08);
+    color:var(--amber);font-size:11px;line-height:1.5}
+  #carPopup .cp-close{position:absolute;top:9px;right:11px;background:none;border:none;color:var(--muted);
+    font-size:14px;cursor:pointer;padding:2px 5px;line-height:1}
+  #carPopup .cp-close:hover{color:var(--ink)}
 </style>
 </head>
 <body>
@@ -53,7 +71,7 @@
 <div class="hud" id="hud">
   <button class="panel-x" id="hide" title="Hide panel (H)">&#10005;</button>
   <h1>City Dispatch</h1>
-  <div class="sub">Tap a car to disable it (<b>red</b>) — crashes auto-clear. Police pull cars over (turns amber).</div>
+  <div class="sub">Tap a car for info. Tap an intersection to cycle control. Crashes auto-clear. Police pull cars over (<b>amber</b>).</div>
   <div class="row"><button id="pause">Pause</button><button id="regen">New map</button></div>
   <div class="row"><button id="revive">Revive all</button></div>
   <div class="field"><label>Traffic <span id="countLbl">60</span></label><input id="count" type="range" min="10" max="180" value="60"></div>
@@ -63,7 +81,15 @@
   <div class="stat"><span>moving / stalled</span><span><b id="moving">0</b> / <b id="dead" style="color:var(--stop)">0</b></span></div>
   <div class="stat" style="margin-top:6px;padding-top:8px"><span>time of day</span><span><b id="tod">day</b></span></div>
 </div>
-<div class="legend">
+<div id="carPopup">
+  <button class="cp-close" id="cpClose">&#10005;</button>
+  <h2 id="cpTitle">Vehicle Info</h2>
+  <div class="cp-row"><span class="cp-label">Distance</span><span class="cp-val" id="cpDist">—</span></div>
+  <div class="cp-row"><span class="cp-label">Avg speed</span><span class="cp-val" id="cpAvg">—</span></div>
+  <div class="cp-row"><span class="cp-label">Max speed</span><span class="cp-val" id="cpMax">—</span></div>
+  <div class="cp-row"><span class="cp-label">Current speed</span><span class="cp-val" id="cpCur">—</span></div>
+  <div class="cp-reason" id="cpReason" style="display:none"></div>
+</div>
   <span><span class="dot" style="background:var(--go)"></span>green</span>
   <span><span class="dot" style="background:var(--stop)"></span>stop</span>
   <span><span class="dot" style="background:#eef2f7"></span>car</span>
@@ -609,7 +635,8 @@ function makeCar(lane,c){
     stopTime:null,stopKey:null,occInt:null,occKey:null,holdTime:0,
     police:false,pstate:'patrol',ptimer:0,cooldown:0,target:null,pulledOver:false,
     len:CAR_L,wid:CAR_W,isBus:false,busPause:0,brake:0,dest:null,route:null,
-    x:0,y:0,angle:0,tint:CAR_COLORS[ri(CAR_COLORS.length)].slice()};
+    x:0,y:0,angle:0,tint:CAR_COLORS[ri(CAR_COLORS.length)].slice(),
+    odometer:0, maxSpeed:0, totalTime:0};   // stats for info popup
   assignDest(car); placeCar(car); return car;
 }
 /* Find a random lane position with enough clearance to spawn/relocate a car. */
@@ -767,6 +794,10 @@ function updateCar(car,dt,t){
   const acc=idm(car.speed,obsGap,obsV,car.vmax);
   car.brake = acc<-7 ? 1 : Math.max(0,(car.brake||0)-dt*5);
   car.speed=clamp(car.speed+acc*dt,0,car.vmax); car.c+=lane.dir*car.speed*dt;
+  // accumulate lifetime stats for the info popup
+  car.odometer=(car.odometer||0)+car.speed*dt;
+  car.totalTime=(car.totalTime||0)+dt;
+  if(car.speed>car.maxSpeed) car.maxSpeed=car.speed;
   car.waitTime=car.speed<4?car.waitTime+dt:0;
   if(car.isBus&&car.busPause>0) car.waitTime=0;
   if(passBlock&&la.gap<PASS_GAP&&car.speed<car.vmax*0.6&&(distToStop>26||!nc)&&!(car.police&&car.pstate==='engaging')){
@@ -993,14 +1024,95 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 
+/* ---- car info popup ---- */
+const carPopup=document.getElementById('carPopup');
+const cpClose=document.getElementById('cpClose');
+let popupTimer=null, popupCar=null;
+
+/* Diagnose why a stopped car is waiting — returns a human-readable string or null. */
+function stopReason(car){
+  if(!car.lane||car.mode!=='lane'||car.speed>3) return null;
+  // find the car's next intersection
+  let nc=null;
+  for(const cr of car.lane.crossings){ const d=car.lane.dir*(cr.P-car.c); if(d>-cr.perpHalf-0.01){ nc=cr; break; } }
+  if(!nc) return null;
+  const it=intersections.get(nc.key); if(!it) return null;
+  const dist=car.lane.dir*(nc.P-car.c)-nc.perpHalf-STOPGAP;
+  if(dist>DECISION_DIST) return null;   // not yet close enough to be signal-gated
+
+  if(it.control==='signal'){
+    const st=sigState(it,car.lane.axis);
+    if(st==='red')   return '🔴 Red light';
+    if(st==='yellow') return '🟡 Yellow — committed to stop';
+    // green but still stopped
+    if(st==='green'){
+      const la=leadAhead(car); if(la.lead&&la.gap<CAR_L*2) return '🟢 Green — queued behind traffic';
+      if(it.turning&&it.turning!==car&&car.move!=='straight') return '🟢 Green — waiting for turning car in box';
+      if(car.move==='left'){
+        const X=car.lane.axis==='h'?nc.P:car.lane.roadCenter, Y=car.lane.axis==='h'?car.lane.roadCenter:nc.P;
+        if(!leftClear(car,X,Y)) return '🟢 Green — yielding to oncoming (left turn)';
+      }
+      if(car.move&&car.move!=='straight'&&entryBlocked(car.lane,nc.P,car.move)) return '🟢 Green — exit lane blocked';
+      if(!canEnter(it,car,simClock)) return '🟢 Green — intersection box reserved by another car';
+      return '🟢 Green — stopped (congestion ahead)';
+    }
+  }
+  if(it.control==='stop'){
+    if(it.occupant&&it.occupant!==car) return '🛑 Stop sign — waiting for intersection to clear';
+    if(!car.stopTime) return '🛑 Stop sign — approaching, not yet stopped';
+    return '🛑 Stop sign — stopped, waiting for gap';
+  }
+  if(it.control==='none'){
+    const la=leadAhead(car); if(la.lead&&la.gap<CAR_L*2) return 'Uncontrolled — queued behind traffic';
+    if(!canEnter(it,car,simClock)) return 'Uncontrolled — box occupied by conflicting car';
+    if(car.move&&car.move!=='straight'&&entryBlocked(car.lane,nc.P,car.move)) return 'Uncontrolled — exit lane blocked';
+  }
+  const la=leadAhead(car);
+  if(la.lead&&la.gap<CAR_L*2.5) return 'Following — queued behind traffic';
+  return null;
+}
+
+function showCarPopup(car, px, py){
+  popupCar=car;
+  // pixel units: 1 unit ≈ 4 metres (LW=12px = one ~5m lane width)
+  const PX_TO_M=4, scale=0.1;   // display in "blocks" where 1 block ≈ 40m
+  const dist=(car.odometer*scale).toFixed(1);
+  const avg=car.totalTime>1?((car.odometer/car.totalTime)*scale).toFixed(2):'—';
+  const maxS=(car.maxSpeed*scale).toFixed(2);
+  const curS=(car.speed*scale).toFixed(2);
+  const type=car.police?'🚔 Police':car.isBus?'🚌 Bus':'🚗 Car';
+  document.getElementById('cpTitle').textContent=type;
+  document.getElementById('cpDist').textContent=dist+' bl';
+  document.getElementById('cpAvg').textContent=avg+' bl/s';
+  document.getElementById('cpMax').textContent=maxS+' bl/s';
+  document.getElementById('cpCur').textContent=curS+' bl/s';
+  const reason=stopReason(car);
+  const reasonEl=document.getElementById('cpReason');
+  if(reason){ reasonEl.textContent=reason; reasonEl.style.display='block'; }
+  else { reasonEl.style.display='none'; }
+  // position near click but keep inside viewport
+  const W2=window.innerWidth, H2=window.innerHeight;
+  const pw=230, ph=200;
+  let lft=px+14, top=py-10;
+  if(lft+pw>W2-10) lft=px-pw-14;
+  if(top+ph>H2-10) top=H2-ph-10;
+  if(top<10) top=10;
+  carPopup.style.left=lft+'px'; carPopup.style.top=top+'px';
+  carPopup.classList.add('visible');
+  clearTimeout(popupTimer);
+  popupTimer=setTimeout(hideCarPopup, 20000);
+}
+function hideCarPopup(){ carPopup.classList.remove('visible'); clearTimeout(popupTimer); popupTimer=null; popupCar=null; }
+cpClose.addEventListener('click', hideCarPopup);
+carPopup.addEventListener('click', hideCarPopup);
+
 /* ---- interaction ---- */
 canvas.addEventListener('pointerdown',e=>{
-  const r=canvas.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
-  let best=null,bd=16*16;
+  const r=canvas.getBoundingClientRect(), mx=(e.clientX-r.left), my=(e.clientY-r.top);
+  let best=null,bd=20*20;
   for(const car of cars){ const dx=car.x-mx,dy=car.y-my,d=dx*dx+dy*dy; if(d<bd){bd=d;best=car;} }
-  if(best){ best.disabled=!best.disabled;
-    if(best.disabled){ best.disabledBy='click'; best.speed=0; best.waitTime=0; if(best.turnInt){ best.turnInt.turning=null; best.turnInt=null; } if(best.occInt){ if(best.occInt.occupant===best) best.occInt.occupant=null; best.occInt=null; best.occKey=null; } if(best.police&&best.target) releasePolice(best); }
-    else best.disabledBy=null; return; }
+  if(best){ showCarPopup(best, e.clientX, e.clientY); return; }
+  hideCarPopup();
   let bi=null,bdist=34*34;
   for(const it of intersections.values()){ if(it.arm<3) continue; const dx=it.x-mx,dy=it.y-my,d=dx*dx+dy*dy; if(d<bdist){ bdist=d; bi=it; } }
   if(bi) cycleControl(bi);
