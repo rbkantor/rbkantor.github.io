@@ -97,6 +97,7 @@ let graphNbr=new Map(), routableKeys=[]; let routing=true;
 let bg=document.createElement('canvas'), bgx=bg.getContext('2d');
 let targetCount=60, roadKeepProb=0.60, roadblockTarget=3, sceneryLevel=60;
 let paused=false, lastT=performance.now(), simClock=0;
+let deadlockTimer=0;   // accumulates to 1s; gates the rare gridlock-breaker check
 
 const rand=(a,b)=>a+Math.random()*(b-a);
 const ri=n=>Math.floor(Math.random()*n);
@@ -531,13 +532,21 @@ function forwardObstacle(car){
     const g=fwd-CAR_L; if(g<gap){ gap=g; ov=(o.disabled||o.pulledOver||o.mode!=='lane')?0:(o.speed||0); } }
   return {gap,v:ov};
 }
-/* Drop stale intersection-box reservation holders (left the box / timed out). */
+/* Drop stale intersection-box reservation holders (left the box, timed out, or
+   stationary so long they're part of a gridlock). The last case is the deadlock
+   breaker: a holder frozen >GRIDLOCK_T seconds is force-released so the gate can
+   open and a circular wait can unwind. */
+const GRIDLOCK_T=6;
 function boxPrune(it,t){ const vh=getCfg('v',it.x).half, hh=getCfg('h',it.y).half, m=CAR_L*0.5;
   it.holders=(it.holders||[]).filter(o=>{ if(o.disabled||o._inIt!==it) return false;
+    if((o.waitTime||0)>GRIDLOCK_T && o.speed<1) return false;   // stuck holder -> release to break gridlock
     const inb=Math.abs(o.x-it.x)<vh+m&&Math.abs(o.y-it.y)<hh+m;
     if(inb){ o._wasIn=true; return true; }
     if(o._wasIn) return false;
     return (t-(o._claimT||0))<4; }); }
+/* True if `car` may enter the intersection box: two straight movements never
+   conflict; an approaching (not-yet-in-box) holder doesn't block; a stuck holder
+   (released by boxPrune) won't appear here. */
 function canEnter(it,car,t){ boxPrune(it,t);
   const myStraight = car.move==='straight';
   for(const o of it.holders){ if(o===car) continue;
@@ -728,7 +737,10 @@ function updateCar(car,dt,t){
         if(!straight && entryBlocked(lane,nc.P,car.move)) needStop=true;
       }
       if(!canEnter(it,car,t)) needStop=true;
-      if(needStop && !hardStop && car.waitTime>IMPATIENCE){
+      // Impatience lets a long-waiting car force through — but NEVER a turn whose exit
+      // lane is blocked (that seeds box-gridlock). Straight movement may always force,
+      // since the car can actually proceed and clear the box.
+      if(needStop && !hardStop && car.waitTime>IMPATIENCE && (straight || !entryBlocked(lane,nc.P,car.move))){
         needStop=false;
         if(it.control==='stop' && it.occupant===null){ it.occupant=car; it.occTime=t; car.occInt=it; car.occKey=nc.key; car.stopKey=null; car.stopTime=null; }
         if(straight) claimBox(it,car,t);
@@ -963,6 +975,15 @@ function frame(now){
     detectCollisions(simClock);
     for(const it of intersections.values()){ if(it.occupant&&simClock-it.occTime>4){ const o=it.occupant; it.occupant=null; if(o.occInt===it){ o.occInt=null; o.occKey=null; } } if(it.turning&&simClock-(it.turnTime||0)>4){ it.turning=null; } }
     for(const c of cars){ if(c.disabled&&c.disabledBy==='collision'&&simClock>=c.clearAt){ c.disabled=false; c.disabledBy=null; c.graceUntil=simClock+CRASH_GRACE; c.speed=0; } }
+    // Deadlock breaker (last resort): a packed loop of cars can't break itself with
+    // local rules, so if any car has been frozen far longer than any legitimate wait,
+    // relocate the single worst offender to open the ring. Rare by design.
+    deadlockTimer+=dt;
+    if(deadlockTimer>=1){ deadlockTimer=0;
+      for(const c of cars){ if(c.disabled||c.pulledOver){ c._fz=0; continue; } c._fz=(c.speed<1.5)?(c._fz||0)+1:0; }
+      let worst=null; for(const c of cars){ if(!c.disabled&&!c.pulledOver&&(c._fz||0)>18&&(!worst||c._fz>worst._fz)) worst=c; }
+      if(worst){ relocateCar(worst); worst._fz=0; }
+    }
   }
   render(simClock);
   let moving=0,dead=0; for(const c of cars){ if(c.disabled) dead++; else if(c.speed>6) moving++; }
