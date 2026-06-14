@@ -76,16 +76,17 @@
 "use strict";
 const canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
 
-const LW=12, CAR_L=17, CAR_W=9, STOPGAP=5, EXIT_PAD=3, DECISION_DIST=85;
-const G=4.6, R=1.3, Yp=1.5, CYCLE=2*(G+Yp+R), DAY_LEN=82;
-const ACC=78, DEC=98, S0=7, T_HW=0.7, TURN_SPEED=42, PASS_GAP=58;
-const CRASH_CLEAR=6, CRASH_GRACE=2.2, IMPATIENCE=5;
-const MING=2.5, MAXG=8, BUS_L=25;
-const CAR_COLORS=[[233,236,242],[223,228,237],[214,219,228],
-  [238,118,170],[230,86,150],
-  [82,142,228],[64,108,214],
-  [82,190,120],[64,170,104],
-  [240,196,84],[226,128,70],[96,196,196]];
+// --- Geometry/timing constants (pixels & seconds) ---
+const LW=12, CAR_L=17, CAR_W=9, STOPGAP=5, EXIT_PAD=3, DECISION_DIST=85;  // lane width, car size, stop gap, lane-change pad, how far out a car decides its move
+const G=4.6, R=1.3, Yp=1.5, CYCLE=2*(G+Yp+R), DAY_LEN=82;                 // base green/all-red/yellow durations; full day length
+const ACC=78, DEC=98, S0=7, T_HW=0.7, TURN_SPEED=42, PASS_GAP=58;          // IDM accel/decel, min gap, headway time, turn speed, overtake gap
+const CRASH_CLEAR=6, CRASH_GRACE=2.2, IMPATIENCE=5;                         // crash clear time, post-revive grace, seconds before a waiting car forces through
+const MING=2.5, MAXG=8, BUS_L=25;                                          // signal min/(legacy)max green, bus length
+const CAR_COLORS=[[233,236,242],[223,228,237],[214,219,228],               // car palette: whites...
+  [238,118,170],[230,86,150],                                              // ...pinks...
+  [82,142,228],[64,108,214],                                               // ...blues...
+  [82,190,120],[64,170,104],                                               // ...greens...
+  [240,196,84],[226,128,70],[96,196,196]];                                 // ...yellow, orange, teal
 
 let W,H,dpr;
 let hys=[], vxs=[], xmin,xmax,ymin,ymax;
@@ -106,6 +107,7 @@ const getCfg=(axis,center)=>roadCfg.get(axis+'_'+center);
 function genPositions(lo,hi){ const pos=[lo]; let p=lo;
   while(true){ p+=rand(100,162); if(p>hi-82) break; pos.push(Math.round(p)); }
   pos.push(hi); return pos; }
+/* Randomly drop interior road lines, keeping at least `keep` of them. */
 function dropInterior(arr,keep){
   if(arr.length<=2) return arr.slice();
   const out=[arr[0]]; let kept=0;
@@ -113,6 +115,7 @@ function dropInterior(arr,keep){
   if(kept===0&&arr.length>2) out.push(arr[1+ri(arr.length-2)]);
   out.push(arr[arr.length-1]); out.sort((a,b)=>a-b); return out;
 }
+/* Build a road-configuration record (axis, center, lane count, half-width, dirs). */
 function makeRoadCfg(axis,center){
   let oneway=false,dirs,m,owDir=null,n=null;
   if(false){ oneway=true; owDir=Math.random()<0.5?1:-1; n=Math.random()<0.55?1:2; dirs=[owDir]; }
@@ -121,9 +124,11 @@ function makeRoadCfg(axis,center){
   return {axis,center,oneway,owDir,dirs,dirsSet:new Set(dirs),lanesPerDir:oneway?n:m,
     half:totalLanes/2*LW,totalLanes, lanesFor(d){ return this.dirsSet.has(d)?this.lanesPerDir:0; }};
 }
+/* Count how many road arms (N/E/S/W) are active at grid cell (i,j). */
 function armCountAt(i,j,hS,vS){ const X=vxs[i],Y=hys[j]; let n=0;
   if(i<vxs.length-1&&hS[Y][i])n++; if(i>0&&hS[Y][i-1])n++;
   if(j<hys.length-1&&vS[X][j])n++; if(j>0&&vS[X][j-1])n++; return n; }
+/* Flood-fill the active segment graph to find the largest connected road network. */
 function activeConnected(hS,vS){
   const Wn=vxs.length,Hn=hys.length, idx=(i,j)=>i*Hn+j, isAct=new Array(Wn*Hn).fill(false); let active=0,first=-1;
   for(let i=0;i<Wn;i++)for(let j=0;j<Hn;j++){ if(armCountAt(i,j,hS,vS)>=1){ isAct[idx(i,j)]=true; active++; if(first<0)first=idx(i,j); } }
@@ -136,6 +141,7 @@ function activeConnected(hS,vS){
   }
   return {ok:seen.size===active,count:active};
 }
+/* Remove dangling one-arm road stubs that connect to nothing useful. */
 function pruneStubs(hS,vS){
   let changed=true;
   while(changed){ changed=false;
@@ -149,10 +155,12 @@ function pruneStubs(hS,vS){
     }
   }
 }
+/* Create empty segment-open lookup tables for horizontal and vertical roads. */
 function freshSegs(){ const hS={},vS={};
   for(const Y of hys) hS[Y]=new Array(Math.max(0,vxs.length-1)).fill(true);
   for(const X of vxs) vS[X]=new Array(Math.max(0,hys.length-1)).fill(true);
   return {hS,vS}; }
+/* Decide which road segments are open vs closed (roadwork/dropped roads). */
 function generateSegments(){
   const frac=clamp(0.4*(1-roadKeepProb)+0.14,0.1,0.42);
   const need=Math.max(6, Math.floor(vxs.length*hys.length*0.32));
@@ -173,6 +181,7 @@ function generateSegments(){
   }
   if(best){ hSeg=best.hS; vSeg=best.vS; } else { const f=freshSegs(); hSeg=f.hS; vSeg=f.vS; }
 }
+/* Create intersection records at every road crossing with arm flags and control type. */
 function buildIntersections(){
   intersections=new Map();
   for(let j=0;j<hys.length;j++) for(let i=0;i<vxs.length;i++){
@@ -184,6 +193,7 @@ function buildIntersections(){
       sigAxis:Math.random()<0.5?'h':'v',sigPhase:'green',sigT:Math.random()*MAXG,dmdH:0,dmdV:0});
   }
 }
+/* Top-level world build: roads, intersections, lanes, graph, scene, cars. */
 function buildWorld(){
   const m=46; xmin=m; xmax=Math.round(W-m); ymin=m; ymax=Math.round(H-m);
   vxs=dropInterior(genPositions(xmin,xmax),roadKeepProb); hys=dropInterior(genPositions(ymin,ymax),roadKeepProb);
@@ -197,6 +207,7 @@ function buildWorld(){
   for(const Y of hys) addLanesForRoad(getCfg('h',Y));
   buildBars(); buildScene(); buildBarriers(roadblockTarget); buildBackground(); spawnCars(targetCount);
 }
+/* Create the individual lane records (per direction, per index) for one road. */
 function addLanesForRoad(cfg){
   const {axis,center}=cfg; const loC=axis==='h'?xmin:ymin, hiC=axis==='h'?xmax:ymax;
   for(const dir of cfg.dirs){ const nD=cfg.lanesPerDir;
@@ -212,9 +223,11 @@ function addLanesForRoad(cfg){
       lanes.push(lane); laneMap.set(lane.id,lane);
     } }
 }
+/* Return the pixel span [lo,hi] covered by all lanes of one direction on a road. */
 function dirSpan(axis,center,dir){ const cfg=getCfg(axis,center); let lo=Infinity,hi=-Infinity;
   for(const lane of lanes){ if(lane.cfg===cfg&&lane.dir===dir){ lo=Math.min(lo,lane.coord); hi=Math.max(hi,lane.coord); } }
   if(lo===Infinity){lo=center;hi=center;} return [lo-LW/2,hi+LW/2]; }
+/* Build stop-bar / signal-bar geometry drawn at controlled intersection approaches. */
 function buildBars(){
   bars=[];
   for(const it of intersections.values()){ if(!it.signalized) continue;
@@ -223,12 +236,14 @@ function buildBars(){
     for(const d of vCfg.dirs){ if(!(d>0?it.N:it.S)) continue; const [lo,hi]=dirSpan('v',X,d); const by=d>0?Y-hHalf:Y+hHalf; bars.push({x:lo,y:by-1.5,w:hi-lo,h:3,axis:'v',intObj:it}); }
   }
 }
+/* Compute the open longitudinal ranges of a lane (skipping closed segments). */
 function laneOpenRanges(lane){
   const r=[];
   if(lane.axis==='h'){ const seg=hSeg[lane.roadCenter]; for(let i=0;i<seg.length;i++) if(seg[i]) r.push([vxs[i],vxs[i+1]]); }
   else { const seg=vSeg[lane.roadCenter]; for(let j=0;j<seg.length;j++) if(seg[j]) r.push([hys[j],hys[j+1]]); }
   return r;
 }
+/* Place roadwork barriers on random open lane positions, up to `target`. */
 function buildBarriers(target){
   barriers=[];
   const cand=lanes.filter(l=>l.nLanesDir>=2);
@@ -244,6 +259,7 @@ function buildBarriers(target){
       if(clash) continue; barriers.push({lane,c,isBarrier:true});
     } }
 }
+/* Assemble static scene elements (buildings, parks, trees) in empty blocks. */
 function buildScene(){
   sceneCells=[]; nightWindows=[];
   const roofs=['#3a3f47','#2f343c','#45413b','#383c44','#4a463f','#34373d','#41372f'];
@@ -282,8 +298,10 @@ function lightState(it,axis,t){
   if(tt<base+G+Yp) return axis==='v'?'yellow':'red';
   return 'red';
 }
+/* Return current signal state (green/yellow/red) for a given axis at an intersection. */
 function sigState(it,axis){ if(it.sigPhase==='green'&&it.sigAxis===axis) return 'green'; if(it.sigPhase==='yellow'&&it.sigAxis===axis) return 'yellow'; return 'red'; }
 const MAXG_EXT=22;
+/* Count slow/stopped cars waiting on each axis of a signalized intersection. */
 function queueAt(it){
   let qH=0,qV=0;
   for(const c of cars){
@@ -294,6 +312,7 @@ function queueAt(it){
   }
   return {qH,qV};
 }
+/* Adaptive signal controller: extend green by queue length, switch on demand. */
 function updateSignals(dt){
   for(const it of intersections.values()){ if(it.control!=='signal') continue;
     it.sigT+=dt; const cur=it.sigAxis;
@@ -314,6 +333,7 @@ const SKY=[
   {p:0.73,c:[156,104,68],a:0.08},{p:0.81,c:[64,48,62],a:0.22},{p:0.90,c:[20,27,50],a:0.40},
   {p:1.00,c:[20,27,50],a:0.40}
 ];
+/* Return the day/night sky overlay colour+alpha for a cycle phase. */
 function skyTint(phase){
   let i=0; while(i<SKY.length-1 && phase>SKY[i+1].p) i++;
   const a0=SKY[i], a1=SKY[Math.min(i+1,SKY.length-1)];
@@ -335,6 +355,7 @@ function buildGraph(){
     const it=intersections.get(K); if(it&&it.arm>=2) routableKeys.push(K);
   }
 }
+/* BFS shortest path (by hops) between two intersection keys; returns key list. */
 function routeTo(start,dest){
   if(start===dest) return [start];
   const prev=new Map([[start,null]]), q=[start]; let head=0;
@@ -343,14 +364,18 @@ function routeTo(start,dest){
   if(!prev.has(dest)) return null;
   const path=[]; let c=dest; while(c!=null){ path.push(c); c=prev.get(c); } path.reverse(); return path;
 }
+/* Pick a new random routable destination intersection for a car. */
 function assignDest(car){ if(!routableKeys.length){ car.dest=null; return; } car.dest=routableKeys[ri(routableKeys.length)]; car.route=null; }
+/* Compass direction (N/E/S/W) from an intersection toward a neighbour key. */
 function exitDirTo(it,nk){ const u=nk.indexOf('_'), nx=+nk.slice(0,u), ny=+nk.slice(u+1);
   if(ny===it.y) return nx>it.x?'E':'W'; if(nx===it.x) return ny>it.y?'S':'N'; return null; }
+/* Translate a desired compass exit into a relative move for the car’s lane. */
 function moveForExit(lane,ex){ const a=lane.axis,d=lane.dir;
   if(a==='h'&&d>0) return ex==='E'?'straight':ex==='S'?'right':ex==='N'?'left':'uturn';
   if(a==='h') return ex==='W'?'straight':ex==='N'?'right':ex==='S'?'left':'uturn';
   if(d>0) return ex==='S'?'straight':ex==='W'?'right':ex==='E'?'left':'uturn';
   return ex==='N'?'straight':ex==='E'?'right':ex==='W'?'left':'uturn'; }
+/* Cycle an intersection’s control mode on click: signal -> stop -> none. */
 function cycleControl(it){
   const order=['signal','stop','none']; let i=order.indexOf(it.control); if(i<0)i=2;
   it.control=order[(i+1)%order.length]; it.signalized=it.control==='signal'; it.occupant=null; it.turning=null;
@@ -358,35 +383,50 @@ function cycleControl(it){
   buildBars();
 }
 
-/* ---- moves ---- */
+/* ---- moves ----
+   Lane-index convention (see addLanesForRoad): laneIdx 0 is the innermost lane
+   (nearest the road centerline = the LEFT/turn lane); laneIdx nLanesDir-1 is the
+   outermost lane (at the curb = the RIGHT lane). Discipline below is enforced only
+   on multi-lane roads; single-lane roads (nLanesDir===1) allow every legal move. */
 function validMoves(lane,it){
-  const m=[];
-  if(lane.axis==='h'){ const vCfg=getCfg('v',it.x);
+  const m=[];                                   // collect geometrically-legal exits
+  if(lane.axis==='h'){ const vCfg=getCfg('v',it.x);   // horizontal road meeting a vertical cross-road
     if(lane.dir>0){ if(it.E)m.push('straight'); if(it.S&&vCfg.dirsSet.has(1))m.push('right'); if(it.N&&vCfg.dirsSet.has(-1))m.push('left'); }
     else { if(it.W)m.push('straight'); if(it.N&&vCfg.dirsSet.has(-1))m.push('right'); if(it.S&&vCfg.dirsSet.has(1))m.push('left'); }
-  }else{ const hCfg=getCfg('h',it.y);
+  }else{ const hCfg=getCfg('h',it.y);                  // vertical road meeting a horizontal cross-road
     if(lane.dir>0){ if(it.S)m.push('straight'); if(it.W&&hCfg.dirsSet.has(-1))m.push('right'); if(it.E&&hCfg.dirsSet.has(1))m.push('left'); }
     else { if(it.N)m.push('straight'); if(it.E&&hCfg.dirsSet.has(1))m.push('right'); if(it.W&&hCfg.dirsSet.has(-1))m.push('left'); }
   }
+  // Lane discipline: on multi-lane roads, only the left lane may turn left and only
+  // the right lane may turn right; every lane may go straight.
+  if(lane.nLanesDir>=2){
+    const canLeft=lane.laneIdx===0, canRight=lane.laneIdx===lane.nLanesDir-1;
+    const filtered=m.filter(mv=> mv==='straight' || (mv==='left'&&canLeft) || (mv==='right'&&canRight));
+    if(filtered.length) return filtered;          // keep at least 'straight' if any legal move survives
+  }
   return m;
 }
+/* True if a barrier sits on `lane` ahead of `fromC` within `dist` px (used to pre-empt dead-end queues). */
 function barrierAhead(lane,fromC,dir,dist){
   for(const b of barriers){ if(b.lane!==lane) continue; const dd=dir*(b.c-fromC); if(dd>2&&dd<dist) return true; }
   return false;
 }
+/* Decide a car's turn ('straight'|'left'|'right'|null) at intersection `it`.
+   Prefers the routed direction toward its destination; otherwise picks a
+   discipline-weighted random move (favouring straight). Honours lane discipline
+   via validMoves, and avoids steering straight into a nearby barrier. */
 function chooseMove(car,lane,it){
-  const moves=validMoves(lane,it); if(!moves.length) return null;
+  const moves=validMoves(lane,it); if(!moves.length) return null;   // dead-end: caller handles
   let mv=null;
-  if(routing&&car&&car.dest!=null&&!car.police){
+  if(routing&&car&&car.dest!=null&&!car.police){          // routed choice toward destination
     const K=it.x+'_'+it.y;
-    if(K===car.dest){ if(car.isBus) car.busPause=rand(2.5,4.5); assignDest(car); }
+    if(K===car.dest){ if(car.isBus) car.busPause=rand(2.5,4.5); assignDest(car); }  // arrived: pick a new goal
     if(car.dest!=null){ const path=routeTo(K,car.dest);
       if(path&&path.length>=2){ const ex=exitDirTo(it,path[1]); const m2=ex&&moveForExit(lane,ex);
-        if(m2&&m2!=='uturn'&&moves.includes(m2)) mv=m2; } }
+        if(m2&&m2!=='uturn'&&moves.includes(m2)) mv=m2; } }   // only take it if it's a legal move for this lane
   }
-  if(mv===null){
-    const disc=moves.filter(m=> m==='straight'?true : m==='right'?lane.laneIdx===lane.nLanesDir-1 : lane.laneIdx===0);
-    const use=disc.length?disc:moves, w=use.map(m=>m==='straight'?3:1);
+  if(mv===null){                                          // fallback: weighted-random legal move
+    const use=moves, w=use.map(m=>m==='straight'?3:1);    // straight is 3x as likely as a turn
     let tot=w.reduce((a,b)=>a+b,0), r=Math.random()*tot;
     for(let i=0;i<use.length;i++){ r-=w[i]; if(r<=0){ mv=use[i]; break; } }
     if(mv===null) mv=use[0];
@@ -398,6 +438,7 @@ function chooseMove(car,lane,it){
   }
   return mv;
 }
+/* Return the destination lane a given move (left/right/straight) leads onto. */
 function targetLaneFor(lane,P,move){
   let taxis,tdir,troad;
   if(lane.axis==='h'){ taxis='v'; troad=P; tdir=move==='right'?(lane.dir>0?1:-1):(lane.dir>0?-1:1); }
@@ -410,6 +451,7 @@ function targetLaneFor(lane,P,move){
 /* ---- connectors ---- */
 function bez(p0,c1,c2,p3,u){ const v=1-u,a=v*v*v,b=3*v*v*u,c=3*v*u*u,d=u*u*u;
   return {x:a*p0.x+b*c1.x+c*c2.x+d*p3.x,y:a*p0.y+b*c1.y+c*c2.y+d*p3.y}; }
+/* Build a sampled Bezier connector path from one lane to another for a turn. */
 function makeConnector(p0,h0,p3,h3,targetLane,targetC){
   const dist=Math.hypot(p3.x-p0.x,p3.y-p0.y),k=dist*0.5;
   const c1={x:p0.x+h0.x*k,y:p0.y+h0.y*k}, c2={x:p3.x-h3.x*k,y:p3.y-h3.y*k};
@@ -417,10 +459,12 @@ function makeConnector(p0,h0,p3,h3,targetLane,targetC){
   for(let i=1;i<=N;i++){ const p=bez(p0,c1,c2,p3,i/N); len+=Math.hypot(p.x-prev.x,p.y-prev.y); cum.push(len); pts.push(p); prev=p; }
   return {pts,cum,len,targetLane,targetC};
 }
+/* Return the point at arc-length d along a connector path. */
 function connPoint(conn,d){ d=clamp(d,0,conn.len); const cum=conn.cum;
   let i=1; while(i<cum.length&&cum[i]<d)i++;
   const t=(d-cum[i-1])/Math.max(0.001,cum[i]-cum[i-1]); const a=conn.pts[i-1],b=conn.pts[i];
   return {x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t}; }
+/* Begin a turn: attach the connector and switch the car into "turn" mode. */
 function initiateTurn(car,lane,nc){
   const move=car.move,P=nc.P, tL=targetLaneFor(lane,P,move);
   if(!tL){ car.move='straight'; return; }
@@ -429,6 +473,7 @@ function initiateTurn(car,lane,nc){
   if(tL.axis==='v'){ p3={x:tL.coord,y:exit}; h3={x:0,y:tL.dir}; } else { p3={x:exit,y:tL.coord}; h3={x:tL.dir,y:0}; }
   car.conn=makeConnector(p0,h0,p3,h3,tL,exit); car.connD=0; car.mode='turn';
 }
+/* True if a turn connector path is clear of other cars along its whole arc. */
 function connPathClear(conn,exclude){
   for(let i=0;i<conn.pts.length;i++){ const p=conn.pts[i];
     for(const o of cars){ if(o===exclude) continue;
@@ -460,6 +505,7 @@ function uTurnInPlace(car){
   if(!connPathClear(conn,car)){ car.speed=0; return; }
   releaseBox(car); car.conn=conn; car.connD=0; car.mode='turn';
 }
+/* Render a stop-sign octagon (with optional label) at a screen position. */
 function drawStopSign(g,x,y,r){
   g.fillStyle='#c1272d'; g.beginPath();
   for(let i=0;i<8;i++){ const a=Math.PI/8+i*Math.PI/4, px=x+Math.cos(a)*r, py=y+Math.sin(a)*r; i?g.lineTo(px,py):g.moveTo(px,py); }
@@ -476,6 +522,7 @@ function leadAhead(car){
   for(const b of barriers){ if(b.lane!==L) continue; const dd=L.dir*(b.c-car.c); if(dd>0&&dd<best){ best=dd; lead=b; stopped=true; } }
   return {gap:best-CAR_L,lead,stopped};
 }
+/* Short cross-lane "bumper" sensor: nearest car directly in front, any lane. */
 function forwardObstacle(car){
   const cx=Math.cos(car.angle), sy=Math.sin(car.angle); let gap=Infinity, ov=0;
   for(const o of cars){ if(o===car||o.lane===car.lane) continue;
@@ -484,6 +531,7 @@ function forwardObstacle(car){
     const g=fwd-CAR_L; if(g<gap){ gap=g; ov=(o.disabled||o.pulledOver||o.mode!=='lane')?0:(o.speed||0); } }
   return {gap,v:ov};
 }
+/* Drop stale intersection-box reservation holders (left the box / timed out). */
 function boxPrune(it,t){ const vh=getCfg('v',it.x).half, hh=getCfg('h',it.y).half, m=CAR_L*0.5;
   it.holders=(it.holders||[]).filter(o=>{ if(o.disabled||o._inIt!==it) return false;
     const inb=Math.abs(o.x-it.x)<vh+m&&Math.abs(o.y-it.y)<hh+m;
@@ -500,6 +548,7 @@ function canEnter(it,car,t){ boxPrune(it,t);
 function claimBox(it,car,t){ car._inIt=it; car._wasIn=false; car._claimT=t; car._bmove=car.move; car._baxis=car.lane.axis; car._bdir=car.lane.dir;
   if(!it.holders) it.holders=[]; if(!it.holders.includes(car)) it.holders.push(car); }
 function releaseBox(car){ const it=car._inIt; if(it&&it.holders){ const k=it.holders.indexOf(car); if(k>=0) it.holders.splice(k,1); } car._inIt=null; car._wasIn=false; }
+/* True if a left turn is safe (no oncoming traffic close), giving up after 8s. */
 function leftClear(car,X,Y){
   if(car.waitTime>8) return true; const L=car.lane;
   for(const o of cars){ if(o===car||o.disabled) continue; const OL=o.lane; if(!OL||o.mode!=='lane') continue;
@@ -507,6 +556,7 @@ function leftClear(car,X,Y){
       if(dd>-OL.half&&dd<58&&o.speed>6) return false; } }
   return true;
 }
+/* True if the target lane of a turn is blocked by a car or barrier near the exit. */
 function entryBlocked(lane,P,move){
   const tL=targetLaneFor(lane,P,move); if(!tL) return false;
   const tc=lane.roadCenter+tL.dir*(lane.half+EXIT_PAD);
@@ -514,6 +564,7 @@ function entryBlocked(lane,P,move){
   for(const b of barriers){ if(b.lane===tL){ const dd=tL.dir*(b.c-tc); if(dd>-CAR_L&&dd<CAR_L*2.2) return true; } }
   return false;
 }
+/* True if a given move is obstructed (straight: cars/barriers ahead; turns: entryBlocked). */
 function moveBlocked(lane,nc,move){
   if(move==='straight'){ const dir=lane.dir, past=nc.P+dir*(nc.perpHalf+CAR_L*0.8);
     for(const b of barriers){ if(b.lane===lane){ const dd=dir*(b.c-past); if(dd>-CAR_L&&dd<CAR_L*2.2) return true; } }
@@ -521,17 +572,20 @@ function moveBlocked(lane,nc,move){
     return false; }
   return entryBlocked(lane,nc.P,move);
 }
+/* True if the adjacent same-direction lane is clear enough to change into. */
 function siblingClear(car,sib){
   for(const o of cars){ if(o.lane!==sib||o.mode!=='lane') continue; const dd=sib.dir*(o.c-car.c); if(dd>-CAR_L*3.2&&dd<68) return false; }
   for(const b of barriers){ if(b.lane!==sib) continue; const dd=sib.dir*(b.c-car.c); if(dd>-CAR_L*3.2&&dd<68) return false; }
   return true;
 }
+/* Intelligent-Driver-Model acceleration from speed, gap, lead speed and desired speed. */
 function idm(v,gap,vLead,vmax){ gap=Math.max(gap,0.1); const dv=v-vLead;
   const sStar=S0+Math.max(0,v*T_HW+v*dv/(2*Math.sqrt(ACC*DEC)));
   return ACC*(1-Math.pow(v/Math.max(vmax,1),4)-Math.pow(sStar/gap,2)); }
 
 /* ---- police ---- */
 function releasePolice(car){ if(car.target){ car.target.pulledOver=false; car.target=null; } car.pstate='patrol'; car.cooldown=rand(10,20); }
+/* Fix up inconsistent police state each frame (orphaned targets, etc.). */
 function sanitizePolice(){
   const set=new Set(cars);
   for(const c of cars) if(c.police&&c.target&&!set.has(c.target)){ c.target=null; c.pstate='patrol'; c.cooldown=2; }
@@ -549,6 +603,7 @@ function makeCar(lane,c){
     x:0,y:0,angle:0,tint:CAR_COLORS[ri(CAR_COLORS.length)].slice()};
   assignDest(car); placeCar(car); return car;
 }
+/* Find a random lane position with enough clearance to spawn/relocate a car. */
 function freeSpot(){
   for(let t=0;t<60;t++){
     const lane=lanes[ri(lanes.length)], ranges=laneOpenRanges(lane); if(!ranges.length) continue;
@@ -561,6 +616,7 @@ function freeSpot(){
     if(ok) return {lane,c};
   } return null;
 }
+/* Promote some cars to police based on the police slider. */
 function assignPolice(){
   for(const c of cars) c.police=false;
   const pn=cars.length>=20?Math.max(2,Math.round(cars.length/30)):(cars.length>=8?1:0);
@@ -569,13 +625,16 @@ function assignPolice(){
 }
 function assignBuses(){ const want=cars.length>=30?(2+ri(2)):(cars.length>=12?1:0); let made=0;
   for(const c of cars){ if(made>=want) break; if(c.police) continue; c.isBus=true; c.len=BUS_L; c.vmax=rand(42,60); c.tint=[245,196,72]; made++; } }
+/* (Re)spawn the full car population of size n into free spots. */
 function spawnCars(n){ cars=[]; let tries=0;
   while(cars.length<n&&tries<n*40){ tries++; const s=freeSpot(); if(s) cars.push(makeCar(s.lane,s.c)); } assignPolice(); assignBuses(); }
+/* Add or remove cars to match a new target population. */
 function adjustCount(n){
   if(n>cars.length){ let tries=0; while(cars.length<n&&tries<(n-cars.length)*40){ tries++; const s=freeSpot(); if(s) cars.push(makeCar(s.lane,s.c)); } }
   else if(n<cars.length){ for(let i=n;i<cars.length;i++) if(cars[i].police) releasePolice(cars[i]); cars.length=n; }
   sanitizePolice();
 }
+/* Teleport a car to a free spot (last-resort recovery; rarely used). */
 function relocateCar(car){
   releaseBox(car); const s=freeSpot(); if(!s) return; if(car.target) releasePolice(car); if(car.turnInt){ car.turnInt.turning=null; car.turnInt=null; } if(car.occInt){ if(car.occInt.occupant===car) car.occInt.occupant=null; car.occInt=null; car.occKey=null; }
   car.lane=s.lane; car.c=s.c; car.speed=rand(0,20); car.mode='lane'; car.move=null; car.decKey=null; car.conn=null; car.latOffset=0; car.waitTime=0; placeCar(car);
@@ -583,22 +642,22 @@ function relocateCar(car){
 
 /* ---- update ---- */
 function updateCar(car,dt,t){
-  if(car.disabled){ car.speed=0; placeCar(car); return; }
-  if(car.pulledOver&&car.mode==='lane'){ car.speed=Math.max(0,car.speed-DEC*1.3*dt); car.c+=car.lane.dir*car.speed*dt;
+  if(car.disabled){ car.speed=0; placeCar(car); return; }                 // crashed cars sit still
+  if(car.pulledOver&&car.mode==='lane'){ car.speed=Math.max(0,car.speed-DEC*1.3*dt); car.c+=car.lane.dir*car.speed*dt;  // pulled over by police: ease to the curb
     car.latOffset+=(0-car.latOffset)*Math.min(1,dt*7); placeCar(car); return; }
-  if(car.mode==='turn'){
+  if(car.mode==='turn'){                                                   // --- mid-turn: follow the Bezier connector ---
     const tL=car.conn.targetLane, tC=car.conn.targetC; let blocked=false;
-    for(const o of cars){ if(o.lane===tL&&o.mode==='lane'){ const dd=tL.dir*(o.c-tC); if(dd>-CAR_L*0.6&&dd<CAR_L*1.7){blocked=true;break;} } }
-    if(!blocked) for(const b of barriers){ if(b.lane===tL){ const dd=tL.dir*(b.c-tC); if(dd>-CAR_L*0.6&&dd<CAR_L*1.7){blocked=true;break;} } }
-    if(!blocked){ const fo=forwardObstacle(car); if(fo.gap<5) blocked=true; }
+    for(const o of cars){ if(o.lane===tL&&o.mode==='lane'){ const dd=tL.dir*(o.c-tC); if(dd>-CAR_L*0.6&&dd<CAR_L*1.7){blocked=true;break;} } }  // car waiting on the target lane?
+    if(!blocked) for(const b of barriers){ if(b.lane===tL){ const dd=tL.dir*(b.c-tC); if(dd>-CAR_L*0.6&&dd<CAR_L*1.7){blocked=true;break;} } }       // barrier on the target lane?
+    if(!blocked){ const fo=forwardObstacle(car); if(fo.gap<5) blocked=true; }   // someone directly in front along the arc?
     if(blocked) car.holdTime=(car.holdTime||0)+dt; else car.holdTime=0;
-    if(car.holdTime>2.5) blocked=false;
-    const tgt=blocked?0:Math.min(TURN_SPEED,car.vmax); car.speed+=(tgt-car.speed)*Math.min(1,dt*5);
-    const nd=car.connD+car.speed*dt;
-    const finish=()=>{ car.lane=tL; car.c=tC; car.mode='lane'; car.move=null; car.decKey=null; car.conn=null; car.latOffset=0; car.holdTime=0;
-      if(car.turnInt){ if(car.turnInt.turning===car) car.turnInt.turning=null; car.turnInt=null; }
+    if(car.holdTime>2.5) blocked=false;                                    // ...but never freeze forever; force through after 2.5s
+    const tgt=blocked?0:Math.min(TURN_SPEED,car.vmax); car.speed+=(tgt-car.speed)*Math.min(1,dt*5);  // ease toward turn speed (or stop)
+    const nd=car.connD+car.speed*dt;                                       // advance along the connector arc-length
+    const finish=()=>{ car.lane=tL; car.c=tC; car.mode='lane'; car.move=null; car.decKey=null; car.conn=null; car.latOffset=0; car.holdTime=0;  // land on the target lane, back to normal driving
+      if(car.turnInt){ if(car.turnInt.turning===car) car.turnInt.turning=null; car.turnInt=null; }   // release the turn reservation
       if(car.occInt){ if(car.occInt.occupant===car) car.occInt.occupant=null; car.occInt=null; car.occKey=null; } };
-    if(nd>=car.conn.len){ if(blocked){ car.connD=car.conn.len; car.speed=0; } else finish(); }
+    if(nd>=car.conn.len){ if(blocked){ car.connD=car.conn.len; car.speed=0; } else finish(); }   // reached the end: finish unless blocked at the exit
     else { car.connD=nd; }
     placeCar(car); return;
   }
@@ -678,13 +737,17 @@ function updateCar(car,dt,t){
       if(needStop && car._inIt===it && !car._wasIn) releaseBox(car);
       if(needStop){ if(distToStop<obsGap){ obsGap=distToStop; obsV=0; } }
       else if(!straight && distToStop<=0){
-        if(it.control==='signal'){ it.turning=car; it.turnTime=t; car.turnInt=it; }
-        claimBox(it,car,t); initiateTurn(car,lane,nc); placeCar(car); return;
+        // final lane-discipline guard: never turn against this lane's allowed moves
+        if(!validMoves(lane,it).includes(car.move)){ car.move='straight'; }
+        else { if(it.control==='signal'){ it.turning=car; it.turnTime=t; car.turnInt=it; }
+          claimBox(it,car,t); initiateTurn(car,lane,nc); placeCar(car); return; }
       }
     }
     if(inBox && car.move && car.move!=='straight' && car.mode==='lane'){
-      if(it.control==='signal'){ it.turning=car; it.turnTime=t; car.turnInt=it; }
-      claimBox(it,car,t); initiateTurn(car,lane,nc); placeCar(car); return;
+      // same guard for cars that reach the box still holding a turn intent
+      if(!validMoves(lane,it).includes(car.move)){ car.move='straight'; }
+      else { if(it.control==='signal'){ it.turning=car; it.turnTime=t; car.turnInt=it; }
+        claimBox(it,car,t); initiateTurn(car,lane,nc); placeCar(car); return; }
     }
   }
 
@@ -700,6 +763,7 @@ function updateCar(car,dt,t){
   }
   car.latOffset+=(0-car.latOffset)*Math.min(1,dt*7); placeCar(car);
 }
+/* Recompute a car’s pixel x/y/angle from its lane coordinate and lateral offset. */
 function placeCar(car){
   if(car.mode==='turn'){ const p=connPoint(car.conn,car.connD), p2=connPoint(car.conn,Math.min(car.conn.len,car.connD+1));
     car.x=p.x; car.y=p.y; car.angle=Math.atan2(p2.y-p.y,p2.x-p.x); return; }
@@ -711,6 +775,7 @@ function placeCar(car){
 /* ---- collisions ---- */
 function carCorners(car,s){ const l=(car.len||CAR_L)*s/2,w=(car.wid||CAR_W)*s/2,co=Math.cos(car.angle),si=Math.sin(car.angle),out=[];
   for(const [dx,dy] of [[l,w],[l,-w],[-l,-w],[-l,w]]) out.push({x:car.x+dx*co-dy*si,y:car.y+dx*si+dy*co}); return out; }
+/* Separating-axis test: true if two convex polygons (car bodies) overlap. */
 function polyOverlap(a,b){
   for(const poly of [a,b]) for(let i=0;i<poly.length;i++){
     const p1=poly[i],p2=poly[(i+1)%poly.length], nx=-(p2.y-p1.y),ny=(p2.x-p1.x);
@@ -719,6 +784,7 @@ function polyOverlap(a,b){
     for(const p of b){ const d=p.x*nx+p.y*ny; if(d<mnB)mnB=d; if(d>mxB)mxB=d; }
     if(mxA<mnB||mxB<mnA) return false; } return true;
 }
+/* Disable any pair of cars whose bodies deeply overlap (collision -> crash). */
 function detectCollisions(t){
   const e=cars.filter(c=>!c.disabled&&Math.abs(c.latOffset)<2.5&&!c.police&&!c.pulledOver&&c.graceUntil<=t);
   for(let i=0;i<e.length;i++) for(let j=i+1;j<e.length;j++){
@@ -731,9 +797,11 @@ function detectCollisions(t){
 /* ---- background ---- */
 function rr(g,x,y,w,h,r){ r=Math.min(r,w/2,h/2);
   g.beginPath(); g.moveTo(x+r,y); g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r); g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath(); }
+/* Lighten/darken a hex colour by an amount. */
 function shade(hex,amt){ const n=parseInt(hex.slice(1),16); let r=(n>>16)&255,gn=(n>>8)&255,b=n&255;
   if(amt<0){ const mlt=1+amt; r*=mlt; gn*=mlt; b*=mlt; } else { r+=(255-r)*amt; gn+=(255-gn)*amt; b+=(255-b)*amt; }
   return 'rgb('+(r|0)+','+(gn|0)+','+(b|0)+')'; }
+/* Draw a tree (shadow, foliage) at a position. */
 function drawTree(g,x,y,r,f){
   g.fillStyle='rgba(0,0,0,'+(0.2+0.2*f)+')'; g.beginPath(); g.ellipse(x+1.6,y+r*0.7,r*0.95,r*0.5,0,0,7); g.fill();
   g.fillStyle='#3a2a1c'; g.fillRect(x-1.2,y-1,2.4,r*0.8);
@@ -741,6 +809,7 @@ function drawTree(g,x,y,r,f){
   g.fillStyle='#2f8552'; g.beginPath(); g.arc(x-r*0.3,y-r*0.32,r*0.62,0,7); g.fill();
   g.fillStyle='rgba(120,210,150,'+(0.22+0.4*f)+')'; g.beginPath(); g.arc(x-r*0.4,y-r*0.4,r*0.3,0,7); g.fill();
 }
+/* Draw a building block with roof shading and small detail marks. */
 function drawBuilding(g,b,f){
   const Hh=Math.min(26,(5+b.height*26)*(0.5+0.7*f)), ex=-Hh*0.2, ey=-Hh*0.24;
   const x=b.x,y=b.y,w=b.w,h=b.h, rxx=x+w, byy=y+h;
@@ -763,11 +832,13 @@ function drawBuilding(g,b,f){
     g.fillStyle='rgba(18,20,24,0.92)'; g.fillRect(hx,hyy,4,3); g.fillStyle='rgba(255,255,255,0.07)'; g.fillRect(hx,hyy,4,1); }
   if(b.tank){ g.fillStyle='#2a2622'; g.beginPath(); g.arc(x+ex+w*0.5,y+ey+h*0.5,2.8,0,7); g.fill(); }
 }
+/* Draw a green park cell. */
 function drawPark(g,cell,f){ const {lx,ty,rx,by}=cell, w=rx-lx,h=by-ty;
   g.fillStyle='rgb('+(12+f*8)+','+(40+f*38)+','+(24+f*20)+')'; rr(g,lx,ty,w,h,5); g.fill();
   g.strokeStyle='rgba(120,200,150,'+(0.08+0.12*f)+')'; g.lineWidth=1; rr(g,lx+2,ty+2,w-4,h-4,4); g.stroke();
   for(const tr of cell.trees){ if(tr.r0<0.2+0.85*f) drawTree(g,tr.x,tr.y,tr.baseR*(0.6+0.8*f),f); }
 }
+/* Draw lane-divider road markings along a road. */
 function drawMarkings(g,axis,center){
   const cfg=getCfg(axis,center), L=cfg.totalLanes, half=cfg.half, seg=axis==='h'?hSeg[center]:vSeg[center], pos=axis==='h'?vxs:hys;
   for(let s=0;s<seg.length;s++){ if(!seg[s]) continue; const lo=pos[s],hi=pos[s+1];
@@ -783,6 +854,7 @@ function drawMarkings(g,axis,center){
         g.beginPath(); g.moveTo(-4,-5); g.lineTo(4,0); g.lineTo(-4,5); g.stroke(); g.restore(); } }
   }
 }
+/* Draw a roadwork barrier (cones/markers) for a barrier record. */
 function drawRoadwork(g,b){
   const lane=b.lane, hw=18; let x1,y1,x2,y2;
   if(lane.axis==='h'){ x1=b.c-hw; x2=b.c+hw; y1=lane.coord-LW/2; y2=lane.coord+LW/2; } else { y1=b.c-hw; y2=b.c+hw; x1=lane.coord-LW/2; x2=lane.coord+LW/2; }
@@ -792,6 +864,7 @@ function drawRoadwork(g,b){
     g.fillStyle='#ff8a3d'; g.beginPath(); g.moveTo(cx,cy-3.5); g.lineTo(cx-2.2,cy+2.5); g.lineTo(cx+2.2,cy+2.5); g.closePath(); g.fill();
     g.fillStyle='rgba(255,255,255,0.85)'; g.fillRect(cx-1.6,cy-0.4,3.2,1.1); }
 }
+/* Pre-render the static background (roads, scenery) to an offscreen canvas. */
 function buildBackground(){
   bg.width=Math.round(W*dpr); bg.height=Math.round(H*dpr); bgx.setTransform(dpr,0,0,dpr,0,0);
   const g=bgx, f=sceneryLevel/100;
@@ -840,6 +913,7 @@ function drawCar(car,t){
   }
   ctx.restore();
 }
+/* Per-frame draw: background, cars, signals, stop signs, day/night overlay, HUD. */
 function render(t){
   ctx.drawImage(bg,0,0,W,H);
   for(const it of intersections.values()){ if(it.control!=='stop') continue;
@@ -928,6 +1002,7 @@ roadsInput.oninput=()=>{ roadsLbl.textContent=roadsInput.value+'%'; };
 roadsInput.onchange=()=>{ roadKeepProb=+roadsInput.value/100; buildWorld(); };
 blocksInput.oninput=()=>{ roadblockTarget=+blocksInput.value; blocksLbl.textContent=roadblockTarget; buildBarriers(roadblockTarget); buildBackground(); };
 sceneInput.oninput=()=>{ sceneryLevel=+sceneInput.value; sceneLbl.textContent=sceneryLevel+'%'; buildBackground(); };
+/* Show/hide the HUD control panel. */
 function setPanel(hidden){ hud.classList.toggle('hidden',hidden); toggleBtn.style.display=hidden?'flex':'none'; }
 hideBtn.onclick=()=>setPanel(true); toggleBtn.onclick=()=>setPanel(false);
 window.addEventListener('keydown',e=>{ if(e.key==='h'||e.key==='H') setPanel(!hud.classList.contains('hidden')); });
