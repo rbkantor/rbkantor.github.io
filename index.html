@@ -632,9 +632,14 @@ function updateCar(car,dt,t){
     if(key!==car.decKey){ car.decKey=key; car.move=null; car.stopKey=null; car.stopTime=null; }
     if(car.move===null&&distToStop<DECISION_DIST){ const mv=chooseMove(car,lane,it); if(mv===null){ car.speed=0; return; } car.move=mv; }
     if(car.police&&car.pstate==='engaging'&&car.move){ const vm=validMoves(lane,it); if(vm.includes('straight')) car.move='straight'; else releasePolice(car); }
-    if(car.move&&car.move!=='straight'&&!car.police&&car.waitTime>2.5&&moveBlocked(lane,nc,car.move)){
-      const open=validMoves(lane,it).filter(m=>m!==car.move&&!moveBlocked(lane,nc,m));
-      if(open.length) car.move = open.includes('straight')?'straight':open[0];
+    if(car.move&&car.move!=='straight'&&!car.police&&car.waitTime>1.5){
+      const X0=lane.axis==='h'?nc.P:lane.roadCenter, Y0=lane.axis==='h'?lane.roadCenter:nc.P;
+      const stuck = moveBlocked(lane,nc,car.move) || (car.move==='left'&&!leftClear(car,X0,Y0));
+      if(stuck){
+        const straightOpen = validMoves(lane,it).includes('straight') && !moveBlocked(lane,nc,'straight');
+        if(straightOpen) car.move='straight';
+        else { const open=validMoves(lane,it).filter(m=>m!==car.move&&m!=='straight'&&!moveBlocked(lane,nc,m)); if(open.length) car.move=open[0]; }
+      }
     }
     if(!inBox&&car.move){
       let needStop=false, hardStop=false;
