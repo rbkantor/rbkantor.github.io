@@ -491,9 +491,11 @@ function boxPrune(it,t){ const vh=getCfg('v',it.x).half, hh=getCfg('h',it.y).hal
     if(o._wasIn) return false;
     return (t-(o._claimT||0))<4; }); }
 function canEnter(it,car,t){ boxPrune(it,t);
+  const myStraight = car.move==='straight';
   for(const o of it.holders){ if(o===car) continue;
-    const plat = o._bmove==='straight' && car.move==='straight' && o._baxis===car.lane.axis && o._bdir===car.lane.dir;
-    if(!plat) return false; }
+    if(myStraight && o._bmove==='straight') continue;
+    if(!o._wasIn) continue;
+    return false; }
   return true; }
 function claimBox(it,car,t){ car._inIt=it; car._wasIn=false; car._claimT=t; car._bmove=car.move; car._baxis=car.lane.axis; car._bdir=car.lane.dir;
   if(!it.holders) it.holders=[]; if(!it.holders.includes(car)) it.holders.push(car); }
@@ -661,11 +663,12 @@ function updateCar(car,dt,t){
       } else {
         if(!straight && entryBlocked(lane,nc.P,car.move)) needStop=true;
       }
+      if(!canEnter(it,car,t)) needStop=true;
       if(needStop && !hardStop && car.waitTime>IMPATIENCE){
         needStop=false;
         if(it.control==='stop' && it.occupant===null){ it.occupant=car; it.occTime=t; car.occInt=it; car.occKey=nc.key; car.stopKey=null; car.stopTime=null; }
+        if(straight) claimBox(it,car,t);
       }
-      if(!canEnter(it,car,t)) needStop=true;
       if(!needStop && straight && distToStop<=0) claimBox(it,car,t);
       if(needStop && car._inIt===it && !car._wasIn) releaseBox(car);
       if(needStop){ if(distToStop<obsGap){ obsGap=distToStop; obsV=0; } }
